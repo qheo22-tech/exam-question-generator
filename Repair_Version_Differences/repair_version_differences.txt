@@ -1,0 +1,252 @@
+두 코드 비교
+
+[repair_generatortest_v2: repair_generatortest_v2]
+= 개선된 버전
+
+[repair_generatortest_v1: repair_generatortest_v1]
+= 기존 버전
+
+
+1. Diagnosis 모델 분리
+
+repair_generatortest_v1:
+- diagnosis와 repair 모두 REPAIR_MODEL을 사용함.
+
+repair_generatortest_v2:
+- DIAGNOSIS_MODEL이 별도로 추가됨.
+- 기본값은 REPAIR_MODEL과 같지만 환경변수로 별도 모델 지정 가능.
+- 따라서 진단은 더 큰/다른 모델, 실제 수정은 기존 coder 모델을 사용하는 구조가 가능함.
+
+
+2. Retry별 Temperature 변경
+
+repair_generatortest_v1:
+- Diagnosis temperature = 0.0 고정
+- Repair temperature = 0.05 고정
+
+repair_generatortest_v2:
+- attempt가 증가할수록 temperature가 증가함.
+
+DIAGNOSIS_TEMPERATURES = [0.0, 0.3, 0.5, 0.7, 0.8]
+REPAIR_TEMPERATURES = [0.05, 0.2, 0.4, 0.6, 0.7]
+
+- 1차 실패 후 같은 답을 반복하는 것을 줄이고 다른 해결책을 탐색하도록 변경됨.
+
+
+3. missing_member_on_receiver라는 새로운 오류 유형 추가
+
+repair_generatortest_v1:
+- Java에서
+  "cannot find symbol"
+  "location: variable obj of type A"
+  같은 오류를 주로 method_signature로 처리함.
+
+repair_generatortest_v2:
+- 이를 별도의 missing_member_on_receiver 유형으로 분리함.
+
+예:
+A obj = new C();
+obj.modifyX();
+
+A에 modifyX()가 선언되어 있지 않다면
+C/B의 modifyX()를 public/protected로 바꾸는 것은 해결책이 아니라는 것을 명확히 함.
+
+가능한 해결책:
+- receiver cast
+- 변수의 선언 타입 변경
+- 상위 타입에 메서드 선언
+
+즉 static/compile-time type 문제를 접근제어 문제로 잘못 고치는 것을 방지함.
+
+
+4. Java static type 관련 힌트 강화
+
+repair_generatortest_v1:
+- compile-time receiver type을 확인하라는 일반적인 지침이 있음.
+
+repair_generatortest_v2:
+- "서브클래스 메서드의 public/protected 변경으로는
+  상위 타입 reference에서 존재하지 않는 메서드를 호출할 수 없다"는 규칙을 더 명시적으로 추가함.
+- public ↔ protected를 반복해서 변경하지 말라는 지침도 있음.
+
+
+5. Java Exception 처리 힌트 강화
+
+repair_generatortest_v1:
+- sibling catch는 다른 catch 내부에서 새로 throw된 예외를 잡지 못한다고 설명함.
+
+repair_generatortest_v2:
+- 이 규칙을 더 구체적으로 강화함.
+- 다른 catch에서 throw된 Error를 잡으려면 sibling catch가 아니라
+  전체 try-catch 구조를 감싸는 ENCLOSING try/catch가 필요하다고 명시함.
+- 추가하려는 catch가 CURRENT SOURCE에 이미 존재하는지도 확인하도록 함.
+- 이미 존재하는 catch로 해결되지 않았다면 같은 전략을 반복하지 않도록 함.
+
+
+6. failed_strategies 기능 추가
+
+repair_generatortest_v1:
+- 명시적인 failed_strategies 관리 기능이 없음.
+
+repair_generatortest_v2:
+- failed_strategies 배열을 관리함.
+- 실패한 diagnosis의 repair_strategy를 기억함.
+- 다음 attempt에서 모델에게
+
+[STRATEGIES THAT ALREADY FAILED - DO NOT REPEAT]
+
+형태로 전달함.
+
+즉 이전에 실패했던 수정 전략을 다음 retry에서 반복하지 않도록 개선됨.
+
+
+7. remember_failed_strategy() 함수 추가
+
+repair_generatortest_v2에 새로 추가됨.
+
+def remember_failed_strategy(failed_strategies, diagnosis)
+
+- 실패한 repair_strategy를 저장함.
+- 동일한 전략은 중복 저장하지 않음.
+- 다음 diagnosis에서 실패 전략 목록으로 활용함.
+
+repair_generatortest_v1 에는 이 기능이 없음.
+
+
+8. Diagnosis prompt의 anti-loop 규칙 강화
+
+repair_generatortest_v1:
+- validator error를 보고 다시 분석하도록 하는 기본 구조.
+
+repair_generatortest_v2:
+다음 규칙들이 추가됨.
+
+- 이미 실패한 전략과 동일하거나 동등한 전략을 다시 제안하지 말 것.
+- proposed edit가 CURRENT SOURCE에 이미 존재하는지 확인할 것.
+- 이미 존재하는 수정이라면 현재 오류를 해결하지 못했다는 의미이므로 다른 원인을 찾을 것.
+- proposed edit가 실제 validator error에 영향을 줄 수 있는지 확인할 것.
+
+
+9. must_preserve 규칙 강화
+
+repair_generatortest_v2:
+- must_preserve는 REQUIRED CONCEPTS에서만 가져오도록 명시함.
+- 현재 실패를 발생시키는 잘못된 코드 구조 자체를 "보존해야 할 개념"으로 판단하지 못하도록 함.
+
+예:
+"A 타입 reference를 통해 modifyX()를 호출해야 한다"
+
+이것이 오류 원인이라면 보존 대상이 아니라 수정 대상임.
+
+
+10. 이전 실패 history 전달 방식 변경
+
+repair_generatortest_v1:
+- 최근 attempt의 diagnosis와 validation 전체를 history로 전달함.
+
+repair_generatortest_v2:
+- 최근 history를 더 압축해서 전달함.
+- attempt
+- diagnosis_strategy
+- validation_stage
+- validation_error
+
+중심으로 전달함.
+
+그리고 별도의 failed_strategies 목록을 사용함.
+
+따라서 이전의 잘못된 diagnosis 전체에 모델이 과도하게 끌려가는 현상을 줄이려는 구조임.
+
+
+11. Repair prompt에도 failed strategy 전달
+
+repair_generatortest_v2:
+Repair 단계에도
+
+[STRATEGIES THAT ALREADY FAILED - DO NOT REPEAT]
+
+를 전달함.
+
+따라서 diagnosis뿐 아니라 실제 코드를 수정하는 모델도 이전 실패 전략을 확인할 수 있음.
+
+repair_generatortest_v1에는 없음.
+
+
+12. 모델 호출 함수 개선
+
+repair_generatortest_v1:
+call_ollama()가 항상 REPAIR_MODEL 사용.
+
+repair_generatortest_v2:
+call_ollama(..., model=...) 형태로 변경됨.
+
+따라서 diagnosis와 repair에서 서로 다른 모델을 사용할 수 있음.
+
+
+13. Retry마다 모델 호출 설정 변경
+
+repair_generatortest_v2:
+pick_temperature()를 사용하여 attempt 번호에 따라
+Diagnosis/Repair temperature를 선택함.
+
+repair_generatortest_v1:
+매 attempt에서 동일한 temperature를 사용함.
+
+
+14. 반복 실패 감지 로그 추가
+
+repair_generatortest_v2:
+diagnosis가 이미 failed_strategies에 있는 전략을 다시 제안하면
+
+"[DIAGNOSIS] ⚠️ 이미 실패한 전략을 반복 제안했습니다."
+
+라고 표시함.
+
+repair_generatortest_v1에는 이런 명시적 감지가 없음.
+
+
+15. 두 코드의 공통점
+
+두 코드 모두 기본적인 파이프라인은 동일함.
+
+generation_failures.jsonl
+→ 오류 유형 분류
+→ AI Diagnosis
+→ AI Repair
+→ execute_code()로 실제 compile/run
+→ 성공하면 repair_success.jsonl
+→ 실패하면 retry
+→ 최종 실패하면 repair_failed.jsonl
+
+또한 둘 다:
+- 최대 기본 3회 repair
+- 빈 코드 반환 검사
+- 동일 코드/공백·주석만 변경한 가짜 repair 검사
+- 실제 compile/run validation
+- 원래 문제의 concepts 보존
+기능을 가지고 있음.
+
+
+[핵심 요약]
+
+repair_generatortest_v1는:
+"실패 → AI가 다시 진단 → 수정 → 다시 실행"
+
+구조의 기본 repair pipeline.
+
+repair_generatortest_v2은:
+"실패 → AI가 다시 진단
+      → 이전에 실패한 전략 기억
+      → 같은 전략 금지
+      → 오류를 더 세부적으로 분류
+      → 현재 코드에 이미 적용된 해결책인지 검사
+      → retry마다 탐색 다양성 증가
+      → 수정
+      → 실제 실행"
+
+구조로 개선됨.
+
+특히 repair_generatortest_v2은 기존 65개 문제 중 최종 실패했던
+1) Java static receiver type / missing method 문제
+2) catch 내부에서 throw된 Error를 sibling catch로 잡으려 했던 문제
+를 해결하기 위한 보강이 들어간 버전이라고 볼 수 있음.
